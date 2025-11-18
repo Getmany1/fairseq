@@ -31,6 +31,8 @@ from fairseq.modules import (
 )
 from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.conformer_layer import ConformerWav2Vec2EncoderLayer
+from fairseq.modules.branchformer_layer import BranchformerWav2Vec2EncoderLayer
+from fairseq.modules.ebranchformer_layer import EBranchformerWav2Vec2EncoderLayer
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from fairseq.utils import buffered_arange, index_put, is_xla_tensor
 
@@ -38,7 +40,7 @@ from .utils import pad_to_multiple
 
 EXTRACTOR_MODE_CHOICES = ChoiceEnum(["default", "layer_norm"])
 MASKING_DISTRIBUTION_CHOICES = ChoiceEnum(["static", "uniform", "normal", "poisson"])
-LAYER_TYPE_CHOICES = ChoiceEnum(["transformer", "conformer", "trf_adp"])
+LAYER_TYPE_CHOICES = ChoiceEnum(["transformer", "conformer", "branchformer", "ebranchformer", "trf_adp"])
 
 
 @dataclass
@@ -303,6 +305,22 @@ class Wav2Vec2Config(FairseqDataclass):
     adp_trf_idx: str = field(
         default="all",
     )
+    # (E)Branchformer
+    depthwise_merge_conv_kernel_size: int = field(
+        default=3
+    )
+    gate_activation_fn: str = field(
+        default="identity",
+    )
+    use_macaron_ffn: bool = field(
+        default=True,
+    )
+    use_linear_after_conv: bool = field(
+        default=False,
+    )
+    csgu_linear_units: int = field(
+        default=3072,
+    )
 
 
 @register_model("wav2vec2", dataclass=Wav2Vec2Config)
@@ -403,6 +421,10 @@ class Wav2Vec2Model(BaseFairseqModel):
         encoder_cls = TransformerEncoder
         if cfg.layer_type == "conformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
             encoder_cls = ConformerEncoder
+        elif cfg.layer_type == "branchformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
+            encoder_cls = BranchformerEncoder
+        elif cfg.layer_type == "ebranchformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
+            encoder_cls = EBranchformerEncoder
 
         self.encoder = encoder_cls(cfg)
         self.layer_norm = LayerNorm(self.embed)
@@ -970,6 +992,39 @@ class TransformerEncoder(nn.Module):
                 use_fp16=args.fp16,
                 pos_enc_type="abs",
             )
+        elif args.layer_type == "branchformer":
+            layer = BranchformerWav2Vec2EncoderLayer(
+                embed_dim=self.embedding_dim,
+                attention_heads=args.encoder_attention_heads,
+                dropout=args.dropout,
+                depthwise_conv_kernel_size=args.depthwise_conv_kernel_size,
+                activation_fn="gelu",
+                attn_type=args.attn_type,
+                use_fp16=args.fp16,
+                pos_enc_type=args.pos_enc_type,
+                gate_activation_fn=args.gate_activation_fn,
+                use_linear_after_conv=args.use_linear_after_conv,
+                csgu_linear_units=args.csgu_linear_units,
+                use_macaron_ffn=args.use_macaron_ffn,
+                ffn_embed_dim=args.encoder_ffn_embed_dim,
+            )
+        elif args.layer_type == "ebranchformer":
+            layer = EBranchformerWav2Vec2EncoderLayer(
+                embed_dim=self.embedding_dim,
+                attention_heads=args.encoder_attention_heads,
+                dropout=args.dropout,
+                depthwise_conv_kernel_size=args.depthwise_conv_kernel_size,
+                depthwise_merge_conv_kernel_size=args.depthwise_merge_conv_kernel_size,
+                activation_fn="gelu",
+                attn_type=args.attn_type,
+                use_fp16=args.fp16,
+                pos_enc_type=args.pos_enc_type,
+                gate_activation_fn=args.gate_activation_fn,
+                use_linear_after_conv=args.use_linear_after_conv,
+                csgu_linear_units=args.csgu_linear_units,
+                use_macaron_ffn=args.use_macaron_ffn,
+                ffn_embed_dim=args.encoder_ffn_embed_dim,
+            )
         elif args.layer_type == "trf_adp":
             use_adp = False
             if args.adp_trf_idx == "all":
@@ -1179,7 +1234,8 @@ class TransformerEncoder(nn.Module):
 
 
 class ConformerEncoder(TransformerEncoder):
-    def build_encoder_layer(self, args):
+    def build_encoder_layer(self, args, **kwargs):
+    # def build_encoder_layer(self, args):
         layer = ConformerWav2Vec2EncoderLayer(
             embed_dim=self.embedding_dim,
             ffn_embed_dim=args.encoder_ffn_embed_dim,
@@ -1222,7 +1278,8 @@ class ConformerEncoder(TransformerEncoder):
 
         self.apply(init_bert_params)
 
-    def extract_features(self, x, padding_mask=None, tgt_layer=None):
+    def extract_features(self, x, padding_mask=None, tgt_layer=None, **kwargs):
+    # def extract_features(self, x, padding_mask=None, tgt_layer=None):
         if padding_mask is not None:
             x = index_put(x, padding_mask, 0)
 
@@ -1264,6 +1321,188 @@ class ConformerEncoder(TransformerEncoder):
 
         return x, layer_results
 
+class BranchformerEncoder(TransformerEncoder):
+    def build_encoder_layer(self, args, **kwargs):
+        layer = BranchformerWav2Vec2EncoderLayer(
+            embed_dim=self.embedding_dim,
+            attention_heads=args.encoder_attention_heads,
+            dropout=args.dropout,
+            depthwise_conv_kernel_size=args.depthwise_conv_kernel_size,
+            activation_fn="gelu",
+            attn_type=args.attn_type,
+            pos_enc_type=args.pos_enc_type,
+            use_fp16=args.fp16,
+            gate_activation_fn=args.gate_activation_fn,
+            use_linear_after_conv=args.use_linear_after_conv,
+            csgu_linear_units=args.csgu_linear_units,
+        )
+        layer = fsdp_wrap(layer)
+        if args.checkpoint_activations:
+            layer = checkpoint_wrapper(layer)
+        return layer
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.args = args
+        self.dropout = args.dropout
+        self.embedding_dim = args.encoder_embed_dim
+        self.pos_enc_type = args.pos_enc_type
+        max_source_positions = self.max_positions()
+
+        if self.pos_enc_type == "rel_pos":
+            self.embed_positions = RelPositionalEncoding(
+                max_source_positions, self.embedding_dim
+            )
+        elif self.pos_enc_type == "rope":
+            self.embed_positions = None
+        elif self.pos_enc_type == "abs":
+            self.embed_positions = None  # Abs encoding handled elsewhere
+        else:
+            raise Exception(f"Unsupported positional encoding type: {self.pos_enc_type}")
+
+        self.layers = nn.ModuleList(
+            [self.build_encoder_layer(args) for _ in range(args.encoder_layers)]
+        )
+        self.layer_norm_first = args.layer_norm_first
+        self.layer_norm = LayerNorm(self.embedding_dim)
+        self.layerdrop = args.encoder_layerdrop
+
+        self.apply(init_bert_params)
+
+    def extract_features(self, x, padding_mask=None, tgt_layer=None, **kwargs):
+        if padding_mask is not None:
+            x = index_put(x, padding_mask, 0)
+
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+
+        # Generate position embeddings
+        position_emb = None
+        if self.pos_enc_type == "rel_pos":
+            position_emb = self.embed_positions(x)
+
+        if not self.layer_norm_first:
+            x = self.layer_norm(x)
+
+        x = F.dropout(x, p=self.dropout, training=self.training)
+
+        layer_results = []
+        r = None
+        for i, layer in enumerate(self.layers):
+            dropout_probability = np.random.random()
+            if not self.training or (dropout_probability > self.layerdrop):
+                x, z = layer(
+                    x,
+                    self_attn_padding_mask=padding_mask,
+                    need_weights=False,
+                    position_emb=position_emb,
+                )
+                if tgt_layer is not None:
+                    layer_results.append((x, z))
+            if i == tgt_layer:
+                r = x
+                break
+
+        if r is not None:
+            x = r
+
+        # T x B x C -> B x T x C
+        x = x.transpose(0, 1)
+
+        return x, layer_results
+
+class EBranchformerEncoder(TransformerEncoder):
+    def build_encoder_layer(self, args, **kwargs):
+        layer = EBranchformerWav2Vec2EncoderLayer(
+                embed_dim=self.embedding_dim,
+                attention_heads=args.encoder_attention_heads,
+                dropout=args.dropout,
+                depthwise_conv_kernel_size=args.depthwise_conv_kernel_size,
+                depthwise_merge_conv_kernel_size=args.depthwise_merge_conv_kernel_size,
+                activation_fn="gelu",
+                attn_type=args.attn_type,
+                use_fp16=args.fp16,
+                pos_enc_type=args.pos_enc_type,
+                gate_activation_fn=args.gate_activation_fn,
+                use_linear_after_conv=args.use_linear_after_conv,
+                csgu_linear_units=args.csgu_linear_units,
+                use_macaron_ffn=args.use_macaron_ffn,
+                ffn_embed_dim=args.encoder_ffn_embed_dim,
+            )
+        layer = fsdp_wrap(layer)
+        if args.checkpoint_activations:
+            layer = checkpoint_wrapper(layer)
+        return layer
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.args = args
+        self.dropout = args.dropout
+        self.embedding_dim = args.encoder_embed_dim
+        self.pos_enc_type = args.pos_enc_type
+        max_source_positions = self.max_positions()
+
+        if self.pos_enc_type == "rel_pos":
+            self.embed_positions = RelPositionalEncoding(
+                max_source_positions, self.embedding_dim
+            )
+        elif self.pos_enc_type == "rope":
+            self.embed_positions = None
+        elif self.pos_enc_type == "abs":
+            self.embed_positions = None  # Abs encoding handled elsewhere
+        else:
+            raise Exception(f"Unsupported positional encoding type: {self.pos_enc_type}")
+
+        self.layers = nn.ModuleList(
+            [self.build_encoder_layer(args) for _ in range(args.encoder_layers)]
+        )
+        self.layer_norm_first = args.layer_norm_first
+        self.layer_norm = LayerNorm(self.embedding_dim)
+        self.layerdrop = args.encoder_layerdrop
+
+        self.apply(init_bert_params)
+
+    def extract_features(self, x, padding_mask=None, tgt_layer=None, **kwargs):
+        if padding_mask is not None:
+            x = index_put(x, padding_mask, 0)
+
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+
+        # Generate position embeddings
+        position_emb = None
+        if self.pos_enc_type == "rel_pos":
+            position_emb = self.embed_positions(x)
+
+        if not self.layer_norm_first:
+            x = self.layer_norm(x)
+
+        x = F.dropout(x, p=self.dropout, training=self.training)
+
+        layer_results = []
+        r = None
+        for i, layer in enumerate(self.layers):
+            dropout_probability = np.random.random()
+            if not self.training or (dropout_probability > self.layerdrop):
+                x, z = layer(
+                    x,
+                    self_attn_padding_mask=padding_mask,
+                    need_weights=False,
+                    position_emb=position_emb,
+                )
+                if tgt_layer is not None:
+                    layer_results.append((x, z))
+            if i == tgt_layer:
+                r = x
+                break
+
+        if r is not None:
+            x = r
+
+        # T x B x C -> B x T x C
+        x = x.transpose(0, 1)
+
+        return x, layer_results
 
 class TransformerSentenceEncoderLayer(nn.Module):
     """

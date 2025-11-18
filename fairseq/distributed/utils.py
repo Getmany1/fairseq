@@ -5,7 +5,7 @@
 
 import io
 import logging
-import os
+import os, hostlist
 import pickle
 import random
 import socket
@@ -99,11 +99,11 @@ def _infer_slurm_init(cfg: DistributedTrainingConfig, num_pipelines_per_node):
         node_list = os.environ.get("SLURM_JOB_NODELIST")
     if node_list is not None:
         try:
-            hostnames = subprocess.check_output(
-                ["scontrol", "show", "hostnames", node_list]
-            )
+            hostnames = hostlist.expand_hostlist(node_list) #subprocess.check_output(
+            #    ["scontrol", "show", "hostnames", node_list]
+            #)
             cfg.distributed_init_method = "tcp://{host}:{port}".format(
-                host=hostnames.split()[0].decode("utf-8"),
+                host=hostnames[0],
                 port=cfg.distributed_port,
             )
             nnodes = int(os.environ.get("SLURM_NNODES"))

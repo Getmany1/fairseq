@@ -407,6 +407,12 @@ class BinarizedAudioDataset(RawAudioDataset):
         if self.root_dir:
             fname = os.path.join(self.root_dir, fname)
 
+        _path, slice_ptr = parse_path(fname)
+        if len(slice_ptr) == 2:
+            byte_data = read_from_stored_zip(_path, slice_ptr[0], slice_ptr[1])
+            assert is_sf_audio_data(byte_data)
+            fname = io.BytesIO(byte_data)
+
         wav, curr_sample_rate = sf.read(fname)
         feats = torch.from_numpy(wav).float()
         feats = self.postprocess(feats, curr_sample_rate)

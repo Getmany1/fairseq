@@ -51,6 +51,21 @@ from .positional_encoding import (
     RelPositionalEncoding,
 )
 
+from .branchformer_conv_modules import (
+    ConvolutionalSpatialGatingUnit,
+    ConvolutionModule,
+)
+
+from .branchformer_layer import (
+    BranchformerEncoderLayer,
+    BranchformerWav2Vec2EncoderLayer,
+)
+
+from .ebranchformer_layer import (
+    EBranchformerEncoderLayer,
+    EBranchformerWav2Vec2EncoderLayer,
+)
+
 __all__ = [
     "AdaptiveInput",
     "AdaptiveSoftmax",
@@ -103,4 +118,10 @@ __all__ = [
     "RelPositionalEncoding",
     "RotaryPositionalEmbedding",
     "RotaryPositionMultiHeadedAttention",
+    "ConvolutionalSpatialGatingUnit",
+    "ConvolutionModule",
+    "BranchformerEncoderLayer",
+    "BranchformerWav2Vec2EncoderLayer",
+    "EBranchformerEncoderLayer",
+    "EBranchformerWav2Vec2EncoderLayer",
 ]
