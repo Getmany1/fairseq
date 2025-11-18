@@ -412,7 +412,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
 
                     for size in sizes:
                         pointers.append(address)
-                        address += size * dtype_size
+                        address += int(size) * dtype_size
 
                     return pointers
 

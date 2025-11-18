@@ -133,7 +133,7 @@ class AudioPretrainingTask(FairseqTask):
         if compute_mask:
             mask_args = task_cfg.precompute_mask_config
 
-        if getattr(task_cfg, "binarized_dataset", False):
+        if getattr(task_cfg, "binarized_dataset", False) and split=='train':
             self.datasets[split] = BinarizedAudioDataset(
                 data_path,
                 split=split,

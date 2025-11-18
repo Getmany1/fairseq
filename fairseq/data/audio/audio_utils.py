@@ -145,7 +145,7 @@ def get_features_or_waveform_from_stored_zip(
     use_sample_rate=None,
     waveform_transforms=None,
 ):
-    assert path.endswith(".zip")
+    # assert path.endswith(".zip")
     data = read_from_stored_zip(path, byte_offset, byte_size)
     f = io.BytesIO(data)
     if is_npy_data(data):
