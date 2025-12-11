@@ -5,7 +5,7 @@
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -28,9 +28,6 @@ from fairseq.modules import (
     RelPositionalEncoding,
     SamePad,
     TransposeLast,
-    ESPNETMultiHeadedAttention,
-    RelPositionMultiHeadedAttention,
-    RotaryPositionMultiHeadedAttention,
 )
 from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.conformer_layer import ConformerWav2Vec2EncoderLayer
@@ -43,17 +40,7 @@ from .utils import pad_to_multiple
 
 EXTRACTOR_MODE_CHOICES = ChoiceEnum(["default", "layer_norm"])
 MASKING_DISTRIBUTION_CHOICES = ChoiceEnum(["static", "uniform", "normal", "poisson"])
-LAYER_TYPE_CHOICES = ChoiceEnum(
-    [
-        "transformer",
-        "macaronnet",
-        "macaronnetwithposemb",
-        "conformer",
-        "branchformer",
-        "ebranchformer",
-        "trf_adp"
-    ]
-)
+LAYER_TYPE_CHOICES = ChoiceEnum(["transformer", "conformer", "branchformer", "ebranchformer", "trf_adp"])
 
 
 @dataclass
@@ -434,8 +421,6 @@ class Wav2Vec2Model(BaseFairseqModel):
         encoder_cls = TransformerEncoder
         if cfg.layer_type == "conformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
             encoder_cls = ConformerEncoder
-        elif cfg.layer_type == "macaronnetwithposemb" and cfg.pos_enc_type in ["rel_pos", "rope"]:
-            encoder_cls = MacaronNetWithPosEmbEncoder
         elif cfg.layer_type == "branchformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
             encoder_cls = BranchformerEncoder
         elif cfg.layer_type == "ebranchformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
@@ -995,31 +980,6 @@ class TransformerEncoder(nn.Module):
                 activation_fn=args.activation_fn,
                 layer_norm_first=args.layer_norm_first,
             )
-        elif args.layer_type == "macaronnet":
-            layer = MacaronNetSentenceEncoderLayer(
-                embedding_dim=self.embedding_dim,
-                ffn_embedding_dim=args.encoder_ffn_embed_dim,
-                num_attention_heads=args.encoder_attention_heads,
-                dropout=self.dropout,
-                attention_dropout=args.attention_dropout,
-                activation_dropout=args.activation_dropout,
-                activation_fn=args.activation_fn,
-                layer_norm_first=args.layer_norm_first,
-            )
-        elif args.layer_type == "macaronnetwithposemb":
-            layer = MacaronNetWithPosEmbSentenceEncoderLayer(
-                embedding_dim=self.embedding_dim,
-                ffn_embedding_dim=args.encoder_ffn_embed_dim,
-                num_attention_heads=args.encoder_attention_heads,
-                dropout=self.dropout,
-                attention_dropout=args.attention_dropout,
-                activation_dropout=args.activation_dropout,
-                activation_fn=args.activation_fn,
-                attn_type=args.attn_type,
-                layer_norm_first=args.layer_norm_first,
-                pos_enc_type="rel_pos",
-                use_fp16=args.fp16,
-            )
         elif args.layer_type == "conformer":
             layer = ConformerWav2Vec2EncoderLayer(
                 embed_dim=self.embedding_dim,
@@ -1272,94 +1232,6 @@ class TransformerEncoder(nn.Module):
         """Upgrade a (possibly old) state dict for new versions of fairseq."""
         return state_dict
 
-class MacaronNetWithPosEmbEncoder(TransformerEncoder):
-    def build_encoder_layer(self, args, **kwargs):
-    # def build_encoder_layer(self, args):
-        layer = MacaronNetWithPosEmbSentenceEncoderLayer(
-            embedding_dim=self.embedding_dim,
-            ffn_embedding_dim=args.encoder_ffn_embed_dim,
-            attn_type=args.attn_type,
-            num_attention_heads=args.encoder_attention_heads,
-            dropout=args.dropout,
-            pos_enc_type=args.pos_enc_type,
-            use_fp16=args.fp16,
-        )
-        layer = fsdp_wrap(layer)
-        if args.checkpoint_activations:
-            layer = checkpoint_wrapper(layer)
-        return layer
-
-    def __init__(self, args):
-        super().__init__(args)
-        self.args = args
-        self.dropout = args.dropout
-        self.embedding_dim = args.encoder_embed_dim
-        self.pos_enc_type = args.pos_enc_type
-        max_source_positions = self.max_positions()
-
-        if self.pos_enc_type == "rel_pos":
-            self.embed_positions = RelPositionalEncoding(
-                max_source_positions, self.embedding_dim
-            )
-        elif self.pos_enc_type == "rope":
-            self.embed_positions = None
-        else:
-            raise Exception("Unsupported positional encoding type")
-
-        self.layers = nn.ModuleList(
-            [self.build_encoder_layer(args) for _ in range(args.encoder_layers)]
-        )
-        self.layer_norm_first = args.layer_norm_first
-        self.layer_norm = LayerNorm(self.embedding_dim)
-        self.layerdrop = args.encoder_layerdrop
-
-        self.apply(init_bert_params)
-
-    # Copied from conformer:
-    # def extract_features(self, x, padding_mask=None, tgt_layer=None, **kwargs):
-    # # def extract_features(self, x, padding_mask=None, tgt_layer=None):
-    #     if padding_mask is not None:
-    #         x = index_put(x, padding_mask, 0)
-
-    #     # B x T x C -> T x B x C
-    #     x = x.transpose(0, 1)
-
-    #     # B X T X C here
-    #     position_emb = None
-    #     if self.pos_enc_type == "rel_pos":
-    #         position_emb = self.embed_positions(x)
-
-    #     if not self.layer_norm_first:
-    #         x = self.layer_norm(x)
-
-    #     x = F.dropout(x, p=self.dropout, training=self.training)
-
-    #     layer_results = []
-    #     r = None
-    #     for i, layer in enumerate(self.layers):
-    #         dropout_probability = np.random.random()
-    #         if not self.training or (dropout_probability > self.layerdrop):
-    #             # x, z = layer(
-    #             x, (z, lr) = layer(
-    #                 x,
-    #                 self_attn_padding_mask=padding_mask,
-    #                 need_weights=False,
-    #                 position_emb=position_emb,
-    #             )
-    #             if tgt_layer is not None:
-    #                 # layer_results.append((x, z))
-    #                 layer_results.append((x, z, lr))
-    #         if i == tgt_layer:
-    #             r = x
-    #             break
-
-    #     if r is not None:
-    #         x = r
-
-    #     # T x B x C -> B x T x C
-    #     x = x.transpose(0, 1)
-
-    #     return x, layer_results
 
 class ConformerEncoder(TransformerEncoder):
     def build_encoder_layer(self, args, **kwargs):
@@ -1743,274 +1615,6 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         return x, (attn, layer_result)
 
-class MacaronNetSentenceEncoderLayer(nn.Module):
-    """
-    Implements a Transformer Encoder Layer used in BERT/XLM style pre-trained
-    models with a Macaron-style FFN.
-    """
-
-    def __init__(
-        self,
-        embedding_dim: float = 768,
-        ffn_embedding_dim: float = 1536,
-        num_attention_heads: int = 8,
-        dropout: float = 0.1,
-        attention_dropout: float = 0.1,
-        activation_dropout: float = 0.1,
-        activation_fn: str = "relu",
-        layer_norm_first: bool = False,
-    ) -> None:
-
-        super().__init__()
-        # Initialize parameters
-        self.embedding_dim = embedding_dim
-        self.dropout = dropout
-        self.activation_dropout = activation_dropout
-
-        # Initialize blocks
-        self.activation_fn = utils.get_activation_fn(activation_fn)
-        self.self_attn = MultiheadAttention(
-            self.embedding_dim,
-            num_attention_heads,
-            dropout=attention_dropout,
-            self_attention=True,
-        )
-
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(self.activation_dropout)
-        self.dropout3 = nn.Dropout(dropout)
-
-        self.layer_norm_first = layer_norm_first
-
-        # Macaron pre-FFN
-        self.fc1_macaron = nn.Linear(self.embedding_dim, ffn_embedding_dim)
-        self.fc2_macaron = nn.Linear(ffn_embedding_dim, self.embedding_dim)
-        self.dropout_macaron = nn.Dropout(self.activation_dropout)
-
-        self.macaron_layer_norm = LayerNorm(self.embedding_dim)
-
-        # layer norm associated with the self attention layer
-        self.self_attn_layer_norm = LayerNorm(self.embedding_dim)
-
-        self.fc1 = nn.Linear(self.embedding_dim, ffn_embedding_dim)
-        self.fc2 = nn.Linear(ffn_embedding_dim, self.embedding_dim)
-
-        # layer norm associated with the position wise feed-forward NN
-        self.final_layer_norm = LayerNorm(self.embedding_dim)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        self_attn_mask: torch.Tensor = None,
-        self_attn_padding_mask: torch.Tensor = None,
-        need_weights: bool = False,
-        att_args=None,
-    ):
-        """
-        LayerNorm is applied either before or after the self-attention/ffn
-        modules similar to the original Transformer imlementation.
-        """
-
-        residual = x
-
-        if self.layer_norm_first:
-            x = self.macaron_layer_norm(x)
-
-        x_mac = self.activation_fn(self.fc1_macaron(x))
-        x_mac = self.dropout_macaron(x_mac)
-        x_mac = self.fc2_macaron(x_mac)
-        x = residual + 0.5 * x_mac
-
-        if not self.layer_norm_first:
-            x = self.macaron_layer_norm(x)
-
-        residual = x
-
-        if self.layer_norm_first:
-            x = self.self_attn_layer_norm(x)
-
-        x, attn = self.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            attn_mask=self_attn_mask,
-            need_weights=False,
-        )
-        x = self.dropout1(x)
-        x = residual + x
-
-        if not self.layer_norm_first:
-            x = self.self_attn_layer_norm(x)
-
-        residual = x
-        if self.layer_norm_first:
-            x = self.final_layer_norm(x)
-        
-        layer_result = self.activation_fn(self.fc1(x))
-        layer_result = self.dropout2(layer_result)
-        layer_result = self.fc2(layer_result)
-
-        # x = residual + 0.5 * layer_result
-        x = residual + self.dropout3(0.5 * layer_result)
-
-        if not self.layer_norm_first:
-            x = self.final_layer_norm(x)
-
-        return x, (attn, layer_result)
-
-class MacaronNetWithPosEmbSentenceEncoderLayer(nn.Module):
-    """
-    Implements a Transformer Encoder Layer used in BERT/XLM style pre-trained
-    models with a Macaron-style FFN.
-    """
-
-    def __init__(
-        self,
-        embedding_dim: float = 768,
-        ffn_embedding_dim: float = 1536,
-        num_attention_heads: int = 8,
-        dropout: float = 0.1,
-        attention_dropout: float = 0.1,
-        activation_dropout: float = 0.1,
-        activation_fn: str = "relu",
-        attn_type: str = "espnet",
-        layer_norm_first: bool = False,
-        pos_enc_type: str = "rel_pos",
-        use_fp16: bool = False,
-    ) -> None:
-
-        super().__init__()
-        # Initialize parameters
-        self.embedding_dim = embedding_dim
-        self.dropout = dropout
-        self.activation_dropout = activation_dropout
-
-        self.pos_enc_type = pos_enc_type
-        self.use_fp16 = use_fp16
-
-        # Initialize blocks
-        self.activation_fn = utils.get_activation_fn(activation_fn)
-
-        if attn_type == "espnet":
-            if self.pos_enc_type == "rel_pos":
-                self.self_attn = RelPositionMultiHeadedAttention(
-                    embedding_dim,
-                    num_attention_heads,
-                    dropout=attention_dropout,
-                )
-            elif self.pos_enc_type == "rope":
-                self.self_attn = RotaryPositionMultiHeadedAttention(
-                    embedding_dim, num_attention_heads, dropout=attention_dropout, precision=use_fp16
-                )
-            elif self.pos_enc_type == "abs":
-                self.self_attn = ESPNETMultiHeadedAttention(
-                    embedding_dim,
-                    num_attention_heads,
-                    dropout=attention_dropout,
-                )
-            else:
-                raise Exception(f"Unsupported attention type {self.pos_enc_type}")
-        else:
-            # Default to fairseq MHA
-            self.self_attn = MultiheadAttention(
-                embedding_dim,
-                num_attention_heads,
-                dropout=attention_dropout,
-            )
-
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(self.activation_dropout)
-        self.dropout3 = nn.Dropout(dropout)
-
-        self.layer_norm_first = layer_norm_first
-
-        # Macaron pre-FFN
-        self.fc1_macaron = nn.Linear(self.embedding_dim, ffn_embedding_dim)
-        self.fc2_macaron = nn.Linear(ffn_embedding_dim, self.embedding_dim)
-        self.dropout_macaron = nn.Dropout(self.activation_dropout)
-
-        self.macaron_layer_norm = LayerNorm(self.embedding_dim)
-
-        # layer norm associated with the self attention layer
-        self.self_attn_layer_norm = LayerNorm(self.embedding_dim)
-
-        self.fc1 = nn.Linear(self.embedding_dim, ffn_embedding_dim)
-        self.fc2 = nn.Linear(ffn_embedding_dim, self.embedding_dim)
-
-        # layer norm associated with the position wise feed-forward NN
-        self.final_layer_norm = LayerNorm(self.embedding_dim)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        self_attn_mask: torch.Tensor = None,
-        self_attn_padding_mask: torch.Tensor = None,
-        position_emb: Optional[torch.Tensor] = None,
-        need_weights: bool = False,
-        att_args=None,
-    ):
-        """
-        LayerNorm is applied either before or after the self-attention/ffn
-        modules similar to the original Transformer imlementation.
-        """
-
-        residual = x
-
-        if self.layer_norm_first:
-            x = self.macaron_layer_norm(x)
-
-        x_mac = self.activation_fn(self.fc1_macaron(x))
-        x_mac = self.dropout_macaron(x_mac)
-        x_mac = self.fc2_macaron(x_mac)
-        x = residual + 0.5 * x_mac
-
-        if not self.layer_norm_first:
-            x = self.macaron_layer_norm(x)
-
-        residual = x
-
-        if self.layer_norm_first:
-            x = self.self_attn_layer_norm(x)
-
-        if self.pos_enc_type == "rel_pos":
-            x, attn = self.self_attn(
-                query=x,
-                key=x,
-                value=x,
-                key_padding_mask=self_attn_padding_mask,
-                pos_emb=position_emb,
-                need_weights=need_weights,
-            )
-        else:
-            x, attn = self.self_attn(
-                query=x,
-                key=x,
-                value=x,
-                key_padding_mask=self_attn_padding_mask,
-                need_weights=need_weights,
-            )
-        x = self.dropout1(x)
-        x = residual + x
-
-        if not self.layer_norm_first:
-            x = self.self_attn_layer_norm(x)
-
-        residual = x
-        if self.layer_norm_first:
-            x = self.final_layer_norm(x)
-        
-        layer_result = self.activation_fn(self.fc1(x))
-        layer_result = self.dropout2(layer_result)
-        layer_result = self.fc2(layer_result)
-
-        # x = residual + 0.5 * layer_result
-        x = residual + self.dropout3(0.5 * layer_result)
-
-        if not self.layer_norm_first:
-            x = self.final_layer_norm(x)
-
-        return x, (attn, layer_result)
 
 class AdapterFast(nn.Module):
     def __init__(self, adapter_num, input_dim, hidden_dim, act_fn):
