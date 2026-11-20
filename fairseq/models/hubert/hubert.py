@@ -23,12 +23,16 @@ from fairseq.models.wav2vec.wav2vec2 import (
     LAYER_TYPE_CHOICES,
     ConvFeatureExtractionModel,
     TransformerEncoder,
+    TransformerSentenceEncoderLayer,
+    ConformerEncoder,
+    EBranchformerEncoder,
 )
 from fairseq.modules import GradMultiply, LayerNorm
 from fairseq.tasks.hubert_pretraining import (
     HubertPretrainingConfig,
     HubertPretrainingTask,
 )
+from fairseq.modules.ebranchformer_layer import EBranchformerWav2Vec2EncoderLayer
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +206,7 @@ class HubertConfig(FairseqDataclass):
         default=(2, 0.5, 0.999995),
         metadata={"help": "legacy (to be removed)"},
     )
+    max_positions: int = field(default=100000, metadata={"help": "Max positions"})
 
     # loss computation
     skip_masked: bool = field(
@@ -243,6 +248,22 @@ class HubertConfig(FairseqDataclass):
     )
     fp16: bool = field(default=False, metadata={"help": "If fp16 is being used"})
 
+    # (E)Branchformer
+    depthwise_merge_conv_kernel_size: int = field(
+        default=3
+    )
+    gate_activation_fn: str = field(
+        default="identity",
+    )
+    use_macaron_ffn: bool = field(
+        default=True,
+    )
+    use_linear_after_conv: bool = field(
+        default=False,
+    )
+    csgu_linear_units: int = field(
+        default=3072,
+    )
 
 @register_model("hubert", dataclass=HubertConfig)
 class HubertModel(BaseFairseqModel):
@@ -301,7 +322,13 @@ class HubertModel(BaseFairseqModel):
             torch.FloatTensor(cfg.encoder_embed_dim).uniform_()
         )
 
-        self.encoder = TransformerEncoder(cfg)
+        encoder_cls = TransformerEncoder
+        if cfg.layer_type == "conformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
+            encoder_cls = ConformerEncoder
+        elif cfg.layer_type == "ebranchformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
+            encoder_cls = EBranchformerEncoder
+
+        self.encoder = encoder_cls(cfg)
         self.layer_norm = LayerNorm(self.embed)
 
         self.target_glu = None

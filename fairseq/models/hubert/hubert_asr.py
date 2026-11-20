@@ -27,6 +27,7 @@ from fairseq.models import (
     register_model,
 )
 from fairseq.models.hubert.hubert import MASKING_DISTRIBUTION_CHOICES
+from fairseq.models.wav2vec.wav2vec2 import LAYER_TYPE_CHOICES
 from fairseq.modules import LayerNorm, PositionalEmbedding, TransformerDecoderLayer
 from fairseq.tasks import FairseqTask
 
@@ -133,6 +134,9 @@ class HubertAsrConfig(FairseqDataclass):
     layerdrop: float = field(
         default=0.0,
         metadata={"help": "probability of dropping a layer in hubert"},
+    )
+    layer_type: LAYER_TYPE_CHOICES = field(
+        default="transformer", metadata={"help": "layer type in encoder"}
     )
     normalize: bool = II("task.normalize")
     data: str = II("task.data")
@@ -381,7 +385,8 @@ class HubertEncoder(FairseqEncoder):
         self.freeze_finetune_updates = cfg.freeze_finetune_updates
         self.num_updates = 0
 
-        if task.target_dictionary is not None and not cfg.autoregressive:
+        # if task.target_dictionary is not None and not cfg.autoregressive:
+        if task.target_dictionary is not None and not getattr(cfg, "autoregressive", False):
             self.proj = Linear(d, len(task.target_dictionary))
         elif getattr(cfg, "decoder_embed_dim", d) != d:
             self.proj = Linear(d, cfg.decoder_embed_dim)

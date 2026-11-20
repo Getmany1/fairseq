@@ -57,7 +57,8 @@ def load_feature_shard(feat_dir, split, nshard, rank, percent):
         return np.load(feat_path, mmap_mode="r")
     else:
         nsample = int(np.ceil(len(lengs) * percent))
-        indices = np.random.choice(len(lengs), nsample, replace=False)
+        # indices = np.random.choice(len(lengs), nsample, replace=False)
+        indices = np.sort(np.random.choice(len(lengs), nsample, replace=False))
         feat = np.load(feat_path, mmap_mode="r")
         sampled_feat = np.concatenate(
             [feat[offsets[i]: offsets[i] + lengs[i]] for i in indices], axis=0

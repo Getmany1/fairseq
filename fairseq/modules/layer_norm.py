@@ -23,7 +23,7 @@ try:
 
 except ImportError:
     has_fused_layernorm = False
-
+has_fused_layernorm = False   # apex fused layer norm segfaults on ROCm for some sizes
 
 def LayerNorm(normalized_shape, eps=1e-5, elementwise_affine=True, export=False):
     if torch.jit.is_scripting() or torch.jit.is_tracing():

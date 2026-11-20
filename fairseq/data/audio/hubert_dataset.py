@@ -181,7 +181,7 @@ class HubertDataset(FairseqDataset):
         if len(slice_ptr) == 0:
             wav, cur_sample_rate = sf.read(_path)
         else:
-            assert _path.endswith(".zip")
+            # assert _path.endswith(".zip")
             data = read_from_stored_zip(_path, slice_ptr[0], slice_ptr[1])
             f = io.BytesIO(data)
             wav, cur_sample_rate = sf.read(f)

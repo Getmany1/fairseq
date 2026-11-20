@@ -5,6 +5,7 @@
 
 import logging
 import os
+import io
 import sys
 
 import fairseq
@@ -39,8 +40,25 @@ class Wav2Vec2FeatureReader(object):
         logger.info(f" max_chunk = {self.max_chunk}")
         logger.info(f" model:\n{self.model}")
 
+    # def read_audio(self, path, ref_len=None):
+    #     wav, sr = sf.read(path)
+    #     assert sr == self.task.cfg.sample_rate, sr
+    #     if wav.ndim == 2:
+    #         wav = wav.mean(-1)
+    #     assert wav.ndim == 1, wav.ndim
+    #     if ref_len is not None and abs(ref_len - len(wav)) > 160:
+    #         logging.warning(f"ref {ref_len} != read {len(wav)} ({path})")
+    #     return wav
     def read_audio(self, path, ref_len=None):
-        wav, sr = sf.read(path)
+        parts = path.rsplit(":", 2)
+        if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+            tar, off, size = parts[0], int(parts[1]), int(parts[2])
+            with open(tar, "rb") as f:
+                f.seek(off)
+                data = f.read(size)
+            wav, sr = sf.read(io.BytesIO(data))
+        else:
+            wav, sr = sf.read(path)
         assert sr == self.task.cfg.sample_rate, sr
         if wav.ndim == 2:
             wav = wav.mean(-1)
